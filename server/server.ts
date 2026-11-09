@@ -2,7 +2,8 @@
  * Frontpage API. The server keeps no reader profiles: each browser stores its
  * own interests and HN import and sends them with every feed request. What the
  * server does keep is shared and safe to share: cached HN items and cached
- * Jev judgments (keyed by story and profile), so identical profiles reuse work.
+ * answers (one per story and question, never per reader), so readers who share
+ * an interest share the work.
  */
 import { join, normalize } from "node:path"
 import { isEmpty, judge, type Profile } from "./classify"
@@ -130,36 +131,74 @@ const server = Bun.serve({
 
           const items = await stories(list, limit)
           const visitor = clientKey(req, server.requestIP(req)?.address)
-          const maxFresh = Math.min(perVisitorScoring.remaining(visitor), globalScoring.remaining("all"))
+          const maxQuestions = Math.min(perVisitorScoring.remaining(visitor), globalScoring.remaining("all"))
           const started = performance.now()
-          const result = await judge(items, profile, { maxFresh })
-          perVisitorScoring.spend(visitor, result.fresh)
-          globalScoring.spend("all", result.fresh)
 
-          return json({
-            list,
-            profileEmpty: isEmpty(profile),
-            stats: {
-              stories: items.length,
-              judgedNow: result.fresh,
-              unscored: result.skipped,
-              inputTokens: result.inputTokens,
-              costUsd: result.inputTokens * PRICE_PER_INPUT_TOKEN,
-              ms: Math.round(performance.now() - started),
+          // The reply is a stream of JSON lines: the stories with every score already
+          // cached, then one line per story as its score arrives, then the totals.
+          const encoder = new TextEncoder()
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              let open = true
+              const send = (event: unknown) => {
+                if (!open) return
+                try {
+                  controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))
+                } catch {
+                  open = false // the reader went away; scoring still finishes and is cached
+                }
+              }
+              try {
+                const result = await judge(items, profile, {
+                  maxQuestions,
+                  onCached: (judgments, pending) =>
+                    send({
+                      type: "feed",
+                      list,
+                      profileEmpty: isEmpty(profile),
+                      pending,
+                      stories: items.map((s, rank) => ({
+                        id: s.id,
+                        rank: rank + 1,
+                        title: s.title,
+                        url: s.url ?? `https://news.ycombinator.com/item?id=${s.id}`,
+                        site: siteOf(s.url),
+                        by: s.by,
+                        time: s.time,
+                        score: s.score ?? 0,
+                        comments: s.descendants ?? 0,
+                        judgment: judgments.get(s.id) ?? null,
+                      })),
+                    }),
+                  onScored: (id, judgment) => send({ type: "score", id, judgment }),
+                })
+                perVisitorScoring.spend(visitor, result.asked)
+                globalScoring.spend("all", result.asked)
+                send({
+                  type: "done",
+                  stats: {
+                    stories: items.length,
+                    judgedNow: result.fresh,
+                    unscored: result.skipped,
+                    questions: result.asked,
+                    inputTokens: result.inputTokens,
+                    costUsd: result.inputTokens * PRICE_PER_INPUT_TOKEN,
+                    ms: Math.round(performance.now() - started),
+                  },
+                  errors: [...new Set(result.errors)],
+                })
+              } catch (err) {
+                send({ type: "error", error: err instanceof Error ? err.message : String(err) })
+              }
+              if (open) controller.close()
             },
-            errors: [...new Set(result.errors)],
-            stories: items.map((s, rank) => ({
-              id: s.id,
-              rank: rank + 1,
-              title: s.title,
-              url: s.url ?? `https://news.ycombinator.com/item?id=${s.id}`,
-              site: siteOf(s.url),
-              by: s.by,
-              time: s.time,
-              score: s.score ?? 0,
-              comments: s.descendants ?? 0,
-              judgment: result.judgments.get(s.id) ?? null,
-            })),
+          })
+          return new Response(stream, {
+            headers: {
+              "content-type": "application/x-ndjson; charset=utf-8",
+              "cache-control": "no-store",
+              "x-accel-buffering": "no",
+            },
           })
         } catch (err) {
           return fail(err)

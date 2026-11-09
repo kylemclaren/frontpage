@@ -24,12 +24,13 @@ browser (React + Vite + shadcn/ui)
 Bun server ────────────────────────┤
   HN Firebase API (stories, cached in memory for 5 min)
   TypeSafe API (one yes/no question per story × interest, batched)
-  Postgres / SQLite (shared cache of scores, keyed by story and profile)
+  Postgres / SQLite (shared cache: one answer per story and question)
 ```
 
 - **Scoring** asks the TypeSafe API typed yes/no questions: "Is this story mainly about _Postgres operations_?" for each interest, plus whether the story falls under a skip topic. The best interest match makes up 80% of the score.
-- **Caching:** scores are stored per story and profile, so reloading or switching tabs costs nothing.
-- **Limits** protect the API key when the app is public: caps on profile size per request, a per-visitor budget for fresh scoring, and a global hourly budget. Past those, stories come back unscored with a note.
+- **Caching:** each answer is stored per story and question wording, never per reader. Readers who share an interest share its answers, removing an interest costs nothing, and adding one only asks the new questions. Answers expire after 14 days.
+- **Streaming:** `/api/feed` replies with JSON lines. Stories and every cached score come first, then each remaining score as it is worked out, so the page never waits on the slowest batch. Identical questions already in flight are not asked twice.
+- **Limits** protect the API key when the app is public: caps on profile size per request, a per-visitor budget of new scoring questions, and a global hourly budget. Past those, stories come back unscored with a note.
 
 ## Run it locally
 

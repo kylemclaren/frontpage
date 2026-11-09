@@ -35,10 +35,14 @@ export class Budget {
   }
 }
 
-/** Fresh story judgments one visitor may trigger: about 6 full feeds every 10 minutes. */
-export const perVisitorScoring = new Budget(400, 10 * 60_000)
-/** Fresh story judgments across everyone, per hour (roughly $0.10 of Jev at today's prices). */
-export const globalScoring = new Budget(6_000, 60 * 60_000)
+/**
+ * New scoring questions one visitor may trigger. A full 60-story feed costs one
+ * question per story and interest, so this is about 6 uncached feeds of a
+ * 15-interest profile every 10 minutes. Cached answers are free.
+ */
+export const perVisitorScoring = new Budget(6_000, 10 * 60_000)
+/** New scoring questions across everyone, per hour (roughly $0.50 at today's prices). */
+export const globalScoring = new Budget(100_000, 60 * 60_000)
 /** HN imports one visitor may run (each fetches several HN pages). */
 export const perVisitorImports = new Budget(10, 10 * 60_000)
 

@@ -17,15 +17,20 @@ function connect(): SQL {
 export const sql = connect()
 export const dialect = process.env.DATABASE_URL ? "postgres" : "sqlite"
 
+/** Cached answers older than this are deleted: stories leave HN's lists long before. */
+const SCORE_TTL_MS = 14 * 24 * 60 * 60_000
+const PRUNE_EVERY_MS = 6 * 60 * 60_000
+
 /** Creates tables on first use; every query awaits this. */
 export const ready: Promise<void> = (async () => {
+  // One row per answer: P(yes) for one story and one question (see classify.ts for how keys are made).
   await sql`
-    CREATE TABLE IF NOT EXISTS judgments (
+    CREATE TABLE IF NOT EXISTS scores (
       story_id BIGINT NOT NULL,
-      profile_hash TEXT NOT NULL,
-      json TEXT NOT NULL,
+      question_key TEXT NOT NULL,
+      value DOUBLE PRECISION NOT NULL,
       created_at BIGINT NOT NULL,
-      PRIMARY KEY (story_id, profile_hash)
+      PRIMARY KEY (story_id, question_key)
     )`
   await sql`
     CREATE TABLE IF NOT EXISTS usage (
@@ -35,23 +40,39 @@ export const ready: Promise<void> = (async () => {
     )`
 })()
 
-/** Cached judgments (as JSON strings) for these stories under one profile. */
-export async function getJudgments(storyIds: number[], profileHash: string): Promise<Map<number, string>> {
+/** Cached answers for these stories and questions: story id → question key → P(yes). */
+export async function getScores(storyIds: number[], questionKeys: string[]): Promise<Map<number, Map<string, number>>> {
   await ready
-  if (!storyIds.length) return new Map()
-  const rows: { story_id: number | bigint; json: string }[] =
-    await sql`SELECT story_id, json FROM judgments WHERE profile_hash = ${profileHash} AND story_id IN ${sql(storyIds)}`
-  return new Map(rows.map((r) => [Number(r.story_id), r.json]))
+  const out = new Map<number, Map<string, number>>()
+  if (!storyIds.length || !questionKeys.length) return out
+  const rows: { story_id: number | bigint | string; question_key: string; value: number | string }[] = await sql`
+    SELECT story_id, question_key, value FROM scores
+    WHERE story_id IN ${sql(storyIds)} AND question_key IN ${sql(questionKeys)}`
+  for (const r of rows) {
+    const id = Number(r.story_id)
+    let answers = out.get(id)
+    if (!answers) out.set(id, (answers = new Map()))
+    answers.set(r.question_key, Number(r.value))
+  }
+  return out
 }
 
-export async function putJudgments(rows: { storyId: number; profileHash: string; json: string }[]) {
+let lastPrune = 0
+
+export async function putScores(rows: { storyId: number; key: string; value: number }[]) {
   await ready
   if (!rows.length) return
   const now = Date.now()
-  const values = rows.map((r) => ({ story_id: r.storyId, profile_hash: r.profileHash, json: r.json, created_at: now }))
+  const values = rows.map((r) => ({ story_id: r.storyId, question_key: r.key, value: r.value, created_at: now }))
   await sql`
-    INSERT INTO judgments ${sql(values)}
-    ON CONFLICT (story_id, profile_hash) DO UPDATE SET json = excluded.json, created_at = excluded.created_at`
+    INSERT INTO scores ${sql(values)}
+    ON CONFLICT (story_id, question_key) DO UPDATE SET value = excluded.value, created_at = excluded.created_at`
+  if (now - lastPrune > PRUNE_EVERY_MS) {
+    lastPrune = now
+    sql`DELETE FROM scores WHERE created_at < ${now - SCORE_TTL_MS}`.catch((err: Error) =>
+      console.error("score prune failed:", err.message),
+    )
+  }
 }
 
 /** Daily token tally, for keeping an eye on spend. Never blocks a request. */

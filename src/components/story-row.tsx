@@ -8,7 +8,18 @@ import { cn } from "cn"
 
 const pct = (v: number) => `${Math.round(v * 100)}%`
 
-export function StoryRow({ story, interests, dim }: { story: Story; interests: Map<string, Interest>; dim: boolean }) {
+export function StoryRow({
+  story,
+  interests,
+  dim,
+  pending = false,
+}: {
+  story: Story
+  interests: Map<string, Interest>
+  dim: boolean
+  /** Its score is still being worked out. */
+  pending?: boolean
+}) {
   const j = story.judgment
   const matches = j
     ? Object.entries(j.interests)
@@ -27,16 +38,18 @@ export function StoryRow({ story, interests, dim }: { story: Story; interests: M
     >
       <Tooltip>
         <TooltipTrigger render={<div className="cursor-default" />}>
-          <ScoreRing value={j ? j.relevance : null} />
+          <ScoreRing value={j ? j.relevance : null} pending={pending} />
         </TooltipTrigger>
         <TooltipContent side="right">
           {j ? (
             <div className="grid gap-0.5">
               <span>Relevance {pct(j.relevance)}</span>
               <span className="opacity-70">Best interest match {pct(j.match)}</span>
-              <span className="opacity-70">Would open {pct(j.fit)}</span>
+              {j.taste !== undefined && <span className="opacity-70">Like your HN history {pct(j.taste)}</span>}
               {j.avoid > 0.05 && <span className="opacity-70">Skip topic {pct(j.avoid)}</span>}
             </div>
+          ) : pending ? (
+            "Scoring…"
           ) : (
             "Not scored"
           )}
