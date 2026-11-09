@@ -1,27 +1,31 @@
 /**
- * The Jev questions. The reader's profile (interests + titles they liked on HN)
- * is the shared state. Each question quotes the one story it judges, so
- * answers don't smear between neighbouring stories in a batch.
+ * Scoring. Every score is the answer to one narrow yes/no question about one
+ * story: "is it mainly about <this interest>?", "is it mainly about <this skip
+ * topic>?", or "would someone who liked <these stories> open it?".
+ *
+ * Each answer is cached on its own, keyed by the story and the question's
+ * wording, never by the reader. So readers who share an interest share its
+ * answers, and editing one interest only asks the questions that are new.
+ * A reader's relevance score is computed from those answers on every request.
  */
 import { createHash } from "node:crypto"
-import { getJudgments, putJudgments, recordUsage } from "./db"
+import { getScores, putScores, recordUsage } from "./db"
 import { siteOf, stripHtml, type HNItem, type SavedStory } from "./hn"
-import { ask, chunkGroups, MODEL, type JevResponse, type Question } from "./jev"
+import { ask, MAX_QUESTIONS_PER_REQUEST, MODEL, type Question } from "./jev"
 import type { Interest } from "./topics"
 
-/** Bump when question wording changes so cached judgments are not reused. */
-export const QUESTION_VERSION = 4
-/** How many liked titles (favorites, then submissions) go into the state as examples of the reader's taste. */
+/** Bump when question wording changes so cached answers are not reused. */
+export const QUESTION_VERSION = 5
+/** How many liked titles (favorites, then submissions) the taste question sees. */
 export const TASTE_SAMPLE = 40
 /** With explicit interests, liked HN stories are only a hint, so fewer of them go in. */
 export const TASTE_SAMPLE_WITH_INTERESTS = 12
 /**
- * Share of the score that comes from the best-matching explicit interest
- * (from Ask your AI or typed in). The rest is Jev's overall "would they open
- * it?" judgment, which is where HN favorites and submissions have a say.
+ * Share of the score that comes from the best-matching explicit interest when
+ * the reader also has an HN import. The rest is the taste answer. With no HN
+ * import, the best interest match is the whole score.
  */
 export const INTEREST_WEIGHT = 0.8
-const NONE = "none"
 
 export interface Profile {
   interests: Interest[]
@@ -31,12 +35,12 @@ export interface Profile {
 export interface Judgment {
   /** 0..1, what the feed sorts and filters by. */
   relevance: number
-  /** P(the reader would want to open this story), from the whole profile. */
-  fit: number
   /** P(the story is about the best-matching interest): the max of `interests`. */
   match: number
-  /** P(the story is mainly about one of the reader's skip topics). */
+  /** P(the story is mainly about one of the reader's skip topics): the max over skip topics. */
   avoid: number
+  /** P(a reader who liked the imported HN stories would open this one). Absent with no HN import. */
+  taste?: number
   /** P(the story is mainly about this interest), one yes/no question per interest. */
   interests: Record<string, number>
   best?: string
@@ -44,43 +48,33 @@ export interface Judgment {
   skip?: string
 }
 
-const wants = (p: Profile) => p.interests.filter((i) => !i.avoid)
-const skips = (p: Profile) => p.interests.filter((i) => i.avoid)
+type StoryQuote = ReturnType<typeof storyQuote>
+
+/** One cacheable question, asked of every story. `key` identifies its wording, not the reader. */
+export interface ProfileQuestion {
+  kind: "want" | "skip" | "taste"
+  key: string
+  /** The interest or skip topic this is about (absent for taste). */
+  interestId?: string
+  /** Shared state the question needs. Questions with the same state object are batched together. */
+  state: unknown
+  build: (story: StoryQuote) => Question
+}
+
 const describe = (i: Interest) =>
   i.description && i.description !== i.label ? `${i.label}: ${i.description}` : i.label
-const tasteSample = (p: Profile) => p.liked.slice(0, wants(p).length ? TASTE_SAMPLE_WITH_INTERESTS : TASTE_SAMPLE)
 
 export const isEmpty = (p: Profile) => p.interests.length === 0 && p.liked.length === 0
 
-export function profileHash(p: Profile): string {
-  const key = JSON.stringify({
-    v: QUESTION_VERSION,
-    m: MODEL,
-    i: p.interests.map((i) => [i.id, i.label, i.description, i.avoid ? 1 : 0]),
-    l: tasteSample(p).map((s) => s.id),
-  })
-  return createHash("sha256").update(key).digest("hex").slice(0, 16)
+function questionKey(kind: ProfileQuestion["kind"], text: string) {
+  return createHash("sha256")
+    .update(JSON.stringify([QUESTION_VERSION, MODEL, kind, text]))
+    .digest("hex")
+    .slice(0, 20)
 }
 
-export function profileState(p: Profile) {
-  const w = wants(p)
-  const k = skips(p)
-  const liked = tasteSample(p).map((s) => (s.site ? `${s.title} (${s.site})` : s.title))
-  return {
-    about:
-      "A Hacker News reader's profile. Each question quotes one Hacker News story and asks how well that story fits this reader.",
-    ...(w.length ? { interests: w.map(describe) } : {}),
-    ...(k.length ? { not_interested_in: k.map(describe) } : {}),
-    ...(liked.length
-      ? w.length
-        ? {
-            weak_hint_stories_they_liked: liked,
-            note: "`interests` is what the reader told us they want and matters most. `weak_hint_stories_they_liked` are older HN favorites and submissions: only a weak hint.",
-          }
-        : { stories_they_liked: liked }
-      : {}),
-  }
-}
+/** Shared by every interest and skip question. It says nothing about the reader, so answers are reusable. */
+const TOPIC_STATE = { about: "Each question quotes one Hacker News story and names one topic." }
 
 export function storyQuote(s: HNItem) {
   const site = siteOf(s.url)
@@ -95,146 +89,256 @@ export function storyQuote(s: HNItem) {
   return { title: s.title, ...(site ? { site } : {}), ...(kind ? { kind } : {}), ...(text ? { text } : {}) }
 }
 
-export function storyQuestions(s: HNItem, p: Profile): Record<string, Question> {
-  const story = storyQuote(s)
-  const w = wants(p)
-  const k = skips(p)
-  const questions: Record<string, Question> = {}
-
-  if (w.length || p.liked.length) {
-    const basis = w.length ? "`interests` first and foremost" : "`stories_they_liked`"
-    questions[`s${s.id}_fit`] = {
+function wantQuestion(interest: Interest): ProfileQuestion {
+  const topic = describe(interest)
+  return {
+    kind: "want",
+    key: questionKey("want", topic),
+    interestId: interest.id,
+    state: TOPIC_STATE,
+    build: (story) => ({
       type: "noul",
       instructions: {
-        task: `Judging by this reader's ${basis}, would they want to open the quoted Hacker News story? Judge only the quoted story.`,
-        story,
-      },
-      criteria: {
-        true: "The story is squarely about something this reader cares about",
-        false:
-          "The story is about something else, something they want to avoid, or touches their interests only in passing",
-      },
-    }
-  }
-  // One narrow yes/no per interest. A single choice across all interests spreads
-  // probability thin, so an unrelated story could still look like a partial match.
-  w.forEach((interest, j) => {
-    questions[`s${s.id}_i${j}`] = {
-      type: "noul",
-      instructions: {
-        task: "Is the quoted Hacker News story mainly about this topic the reader cares about? A passing mention or a loose connection does not count. Judge only the quoted story.",
-        topic: describe(interest),
+        task: "Is the quoted Hacker News story mainly about this topic? A passing mention or a loose connection does not count. Judge only the quoted story.",
+        topic,
         story,
       },
       criteria: {
         true: "The story is clearly about this topic; someone who follows the topic would want to see it",
         false: "The story is about something else, or only touches the topic in passing",
       },
-    }
-  })
-  if (k.length) {
-    const criteria: Record<string, string> = {}
-    for (const i of k) criteria[i.id] = describe(i)
-    criteria[NONE] = "None of these: the story is not mainly about any of them"
-    questions[`s${s.id}_skip`] = {
-      type: "choice",
-      instructions: {
-        task: "The reader asked to filter out the topics below. Is the quoted story mainly about one of them? A passing mention does not count. Judge only the quoted story.",
-        story,
-      },
-      criteria,
-    }
+    }),
   }
-  return questions
 }
 
-const notNone = (a: JevResponse["answers"][string] | undefined) =>
-  1 - (a?.probabilities?.[NONE] ?? (a?.choice === NONE ? 1 : 0))
+function skipQuestion(interest: Interest): ProfileQuestion {
+  const topic = describe(interest)
+  return {
+    kind: "skip",
+    key: questionKey("skip", topic),
+    interestId: interest.id,
+    state: TOPIC_STATE,
+    build: (story) => ({
+      type: "noul",
+      instructions: {
+        task: "A reader wants to filter out stories about this topic. Is the quoted Hacker News story mainly about it? A passing mention does not count. Judge only the quoted story.",
+        topic,
+        story,
+      },
+      criteria: {
+        true: "The story is mainly about this topic",
+        false: "The story is about something else, or only mentions the topic in passing",
+      },
+    }),
+  }
+}
 
-export function parseJudgment(s: HNItem, p: Profile, res: JevResponse): Judgment {
-  const w = wants(p)
-  const k = skips(p)
-  const skipAns = res.answers[`s${s.id}_skip`]
+function tasteQuestion(liked: SavedStory[]): ProfileQuestion {
+  return {
+    kind: "taste",
+    key: questionKey("taste", liked.map((s) => s.id).join(",")),
+    state: {
+      about: "Stories a Hacker News reader favorited or submitted. Each question quotes one other story.",
+      stories_they_liked: liked.map((s) => (s.site ? `${s.title} (${s.site})` : s.title)),
+    },
+    build: (story) => ({
+      type: "noul",
+      instructions: {
+        task: "Judging by `stories_they_liked`, would this reader want to open the quoted Hacker News story? Judge only the quoted story.",
+        story,
+      },
+      criteria: {
+        true: "The story is very like the ones they liked, in topic and kind",
+        false: "The story is about something else",
+      },
+    }),
+  }
+}
 
+/** The questions this profile needs answered for each story. */
+export function profileQuestions(p: Profile): ProfileQuestion[] {
+  const out = p.interests.map((i) => (i.avoid ? skipQuestion(i) : wantQuestion(i)))
+  const hasWants = p.interests.some((i) => !i.avoid)
+  const liked = p.liked.slice(0, hasWants ? TASTE_SAMPLE_WITH_INTERESTS : TASTE_SAMPLE)
+  if (liked.length) out.push(tasteQuestion(liked))
+  return out
+}
+
+/** Combine one story's answers (question key → probability) into the reader's judgment. */
+export function combine(questions: ProfileQuestion[], answers: Map<string, number>): Judgment {
   const interests: Record<string, number> = {}
   let match = 0
   let best: string | undefined
-  w.forEach((interest, j) => {
-    const v = res.answers[`s${s.id}_i${j}`]?.noul ?? 0
-    interests[interest.id] = v
-    if (v > match) {
-      match = v
-      best = interest.id
-    }
-  })
+  let avoid = 0
+  let skip: string | undefined
+  let taste: number | undefined
+  let hasWants = false
 
-  const hasFit = w.length > 0 || p.liked.length > 0
-  const fit = hasFit ? (res.answers[`s${s.id}_fit`]?.noul ?? 0) : 1
-  const avoid = k.length ? notNone(skipAns) : 0
-  // Explicit interests dominate; the overall judgment (which also sees HN history) fills in the rest.
-  // With only liked stories, fit is all we have. With only skip topics, everything starts at 1.
-  const base = w.length ? INTEREST_WEIGHT * match + (1 - INTEREST_WEIGHT) * fit : fit
+  for (const q of questions) {
+    const v = answers.get(q.key) ?? 0
+    if (q.kind === "want") {
+      hasWants = true
+      interests[q.interestId!] = v
+      if (v > match) {
+        match = v
+        best = q.interestId
+      }
+    } else if (q.kind === "skip") {
+      if (v > avoid) {
+        avoid = v
+        skip = q.interestId
+      }
+    } else {
+      taste = v
+    }
+  }
+
+  // Explicit interests dominate; an HN import adds a light taste signal.
+  // With only an import, taste is the score. With only skip topics, everything starts at 1.
+  const base = hasWants
+    ? taste === undefined
+      ? match
+      : INTEREST_WEIGHT * match + (1 - INTEREST_WEIGHT) * taste
+    : (taste ?? 1)
   return {
     relevance: base * (1 - avoid),
-    fit,
-    match: w.length ? match : fit,
+    match: hasWants ? match : (taste ?? 0),
     avoid,
+    ...(taste === undefined ? {} : { taste }),
     interests,
     best: match >= 0.5 ? best : undefined,
-    skip: skipAns?.choice && skipAns.choice !== NONE ? skipAns.choice : undefined,
+    skip: avoid >= 0.5 ? skip : undefined,
   }
 }
 
 export interface JudgeResult {
-  judgments: Map<number, Judgment>
+  /** Questions sent for scoring by this call. */
+  asked: number
+  /** Stories this call sent at least one new question for. */
   fresh: number
-  /** Uncached stories left unscored because of `maxFresh`. */
+  /** Stories left unscored because `maxQuestions` ran out. */
   skipped: number
   inputTokens: number
   errors: string[]
 }
 
-/** Judge stories against the profile, reusing cached judgments. At most `maxFresh` uncached stories go to Jev. */
-export async function judge(stories: HNItem[], p: Profile, { maxFresh = Infinity } = {}): Promise<JudgeResult> {
-  const judgments = new Map<number, Judgment>()
-  const result: JudgeResult = { judgments, fresh: 0, skipped: 0, inputTokens: 0, errors: [] }
-  if (isEmpty(p)) return result
+export interface JudgeOptions {
+  /** Upper bound on new questions this call may send. */
+  maxQuestions?: number
+  /** Called once, as soon as the cache has been read: the judgments already known, and how many stories are still being scored. */
+  onCached?: (judgments: Map<number, Judgment>, pending: number) => void
+  /** Called for each remaining story as soon as its last answer arrives. */
+  onScored?: (storyId: number, judgment: Judgment) => void
+}
 
-  const hash = profileHash(p)
-  const cached = await getJudgments(
-    stories.map((s) => s.id),
-    hash,
-  )
-  const uncached: HNItem[] = []
-  for (const s of stories) {
-    const json = cached.get(s.id)
-    if (json) judgments.set(s.id, JSON.parse(json) as Judgment)
-    else uncached.push(s)
+/**
+ * Answers being fetched right now, by "storyId:questionKey". A second request
+ * that needs the same answer waits for the first instead of paying again.
+ */
+const inFlight = new Map<string, Promise<number | undefined>>()
+
+interface Pending {
+  story: HNItem
+  q: ProfileQuestion
+  resolve: (value: number | undefined) => void
+}
+
+/** Send one request-sized batch, store its answers, then hand them to whoever is waiting. */
+async function askBatch(state: unknown, batch: Pending[], result: JudgeResult) {
+  try {
+    const res = await ask(state, Object.fromEntries(batch.map((b, n) => [`q${n}`, b.q.build(storyQuote(b.story))])))
+    const tokens = res.usage?.input_tokens ?? 0
+    result.inputTokens += tokens
+    recordUsage(tokens)
+    const values = batch.map((_, n) => res.answers[`q${n}`]?.noul)
+    const rows = batch.flatMap((b, n) => {
+      const value = values[n]
+      return value === undefined ? [] : [{ storyId: b.story.id, key: b.q.key, value }]
+    })
+    await putScores(rows).catch((err) => console.error("score cache write failed:", (err as Error).message))
+    batch.forEach((b, n) => b.resolve(values[n]))
+  } catch (err) {
+    result.errors.push((err as Error).message)
+    for (const b of batch) b.resolve(undefined)
   }
-  const todo = uncached.slice(0, Math.max(0, maxFresh))
-  result.skipped = uncached.length - todo.length
+}
 
-  const state = profileState(p)
-  const perStory = todo[0] ? Object.keys(storyQuestions(todo[0], p)).length : 1
-  await Promise.all(
-    chunkGroups(todo, perStory).map(async (batch) => {
-      const questions = Object.assign({}, ...batch.map((s) => storyQuestions(s, p))) as Record<string, Question>
-      try {
-        const res = await ask(state, questions)
-        const tokens = res.usage?.input_tokens ?? 0
-        result.inputTokens += tokens
-        recordUsage(tokens)
-        const rows = batch.map((s) => {
-          const j = parseJudgment(s, p, res)
-          judgments.set(s.id, j)
-          return { storyId: s.id, profileHash: hash, json: JSON.stringify(j) }
-        })
-        result.fresh += batch.length
-        await putJudgments(rows)
-      } catch (err) {
-        result.errors.push((err as Error).message)
+/** Judge stories against the profile. Cached answers are reported at once; the rest arrive through `onScored`. */
+export async function judge(stories: HNItem[], p: Profile, options: JudgeOptions = {}): Promise<JudgeResult> {
+  const { maxQuestions = Infinity, onCached, onScored } = options
+  const result: JudgeResult = { asked: 0, fresh: 0, skipped: 0, inputTokens: 0, errors: [] }
+  const questions = profileQuestions(p)
+  if (!questions.length || !stories.length) {
+    onCached?.(new Map(), 0)
+    return result
+  }
+
+  // Two interests with identical wording share one question.
+  const unique = [...new Map(questions.map((q) => [q.key, q])).values()]
+  const cached = await getScores(
+    stories.map((s) => s.id),
+    unique.map((q) => q.key),
+  )
+
+  const ready = new Map<number, Judgment>()
+  /** Stories waiting on answers: what is known so far, plus a promise for each missing answer. */
+  const waiting: { story: HNItem; answers: Map<string, number>; rest: [string, Promise<number | undefined>][] }[] = []
+  /** New questions to send, grouped by the state they share. */
+  const toAsk = new Map<unknown, Pending[]>()
+  let budget = Math.max(0, maxQuestions)
+
+  for (const story of stories) {
+    const answers = cached.get(story.id) ?? new Map<string, number>()
+    const missing = unique.filter((q) => !answers.has(q.key))
+    if (!missing.length) {
+      ready.set(story.id, combine(questions, answers))
+      continue
+    }
+    const fresh = missing.filter((q) => !inFlight.has(`${story.id}:${q.key}`))
+    if (fresh.length > budget) {
+      result.skipped++
+      continue
+    }
+    budget -= fresh.length
+    result.asked += fresh.length
+    if (fresh.length) result.fresh++
+
+    const rest: [string, Promise<number | undefined>][] = []
+    for (const q of missing) {
+      const flightKey = `${story.id}:${q.key}`
+      let promise = inFlight.get(flightKey)
+      if (!promise) {
+        const created = Promise.withResolvers<number | undefined>()
+        promise = created.promise
+        inFlight.set(flightKey, promise)
+        void promise.finally(() => inFlight.delete(flightKey))
+        const group = toAsk.get(q.state) ?? []
+        group.push({ story, q, resolve: created.resolve })
+        toAsk.set(q.state, group)
       }
+      rest.push([q.key, promise])
+    }
+    waiting.push({ story, answers, rest })
+  }
+
+  onCached?.(ready, waiting.length)
+
+  const batches: Promise<void>[] = []
+  for (const [state, group] of toAsk) {
+    for (let i = 0; i < group.length; i += MAX_QUESTIONS_PER_REQUEST) {
+      batches.push(askBatch(state, group.slice(i, i + MAX_QUESTIONS_PER_REQUEST), result))
+    }
+  }
+
+  // Report each story the moment its last answer lands. A story with a failed answer stays unscored.
+  await Promise.all(
+    waiting.map(async ({ story, answers, rest }) => {
+      const values = await Promise.all(rest.map(([, promise]) => promise))
+      if (values.includes(undefined)) return
+      rest.forEach(([key], n) => answers.set(key, values[n]!))
+      onScored?.(story.id, combine(questions, answers))
     }),
   )
+  await Promise.all(batches)
   return result
 }

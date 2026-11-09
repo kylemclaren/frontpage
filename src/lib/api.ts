@@ -10,9 +10,10 @@ export interface Interest {
 
 export interface Judgment {
   relevance: number
-  fit: number
   match: number
   avoid: number
+  /** Present only when the reader has an HN import. */
+  taste?: number
   interests: Record<string, number>
   best?: string
   skip?: string
@@ -33,12 +34,53 @@ export interface Story {
   judgment: Judgment | null
 }
 
+export interface FeedStats {
+  stories: number
+  judgedNow: number
+  unscored: number
+  questions: number
+  inputTokens: number
+  costUsd: number
+  ms: number
+}
+
 export interface Feed {
   list: List
   profileEmpty: boolean
-  errors: string[]
-  stats: { stories: number; judgedNow: number; unscored: number; inputTokens: number; costUsd: number; ms: number }
   stories: Story[]
+  /** Arrives last, once every score is in. */
+  stats?: FeedStats
+  errors: string[]
+}
+
+/** The feed arrives as a stream: stories with cached scores first, then each new score, then totals. */
+export type FeedEvent =
+  | { type: "feed"; list: List; profileEmpty: boolean; pending: number; stories: Story[] }
+  | { type: "score"; id: number; judgment: Judgment }
+  | { type: "done"; stats: FeedStats; errors: string[] }
+  | { type: "error"; error: string }
+
+export async function streamFeed(body: unknown, onEvent: (event: FeedEvent) => void, signal: AbortSignal) {
+  const res = await fetch("/api/feed", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  })
+  if (!res.ok || !res.body) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string }
+    throw new Error(data.error ?? `Request failed (${res.status})`)
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+  let buffer = ""
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (value) buffer += value
+    const lines = buffer.split("\n")
+    buffer = done ? "" : (lines.pop() ?? "")
+    for (const line of lines) if (line.trim()) onEvent(JSON.parse(line) as FeedEvent)
+    if (done) return
+  }
 }
 
 export interface Profile {

@@ -14,7 +14,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Slider } from "@/components/ui/slider"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
-import { api, prefs, type Feed, type Interest, type List, type Mode, type Story } from "@/lib/api"
+import { api, prefs, streamFeed, type Feed, type Interest, type List, type Mode, type Story } from "@/lib/api"
 import { LIKED_SENT, profileView, useLocalProfile, type HnImport } from "@/lib/profile"
 import type { ParsedItem } from "@/lib/ask-ai"
 
@@ -74,10 +74,10 @@ export function App() {
   const [list, setList] = useState<List>(() => prefs.get("list", "top"))
   const [mode, setMode] = useState<Mode>(() => prefs.get("mode", "bubble"))
   const [threshold, setThreshold] = useState(() => prefs.get("threshold", 50))
-  // Bumping `version` refetches the feed. Each response is tagged with the request it answers,
-  // so "loading" is just "the latest answer is for an older request".
+  // Bumping `version` refetches the feed. Progress is tagged with the request it belongs to,
+  // so a request with no progress yet is simply "the latest progress is for an older request".
   const [version, setVersion] = useState(0)
-  const [result, setResult] = useState<{ key: string; feed?: Feed; error?: string } | null>(null)
+  const [result, setResult] = useState<{ key: string; phase: "scoring" | "done"; error?: string } | null>(null)
   const [feed, setFeed] = useState<Feed | null>(null)
   const [scoringConfigured, setScoringConfigured] = useState(true)
   const [askOpen, setAskOpen] = useState(false)
@@ -99,24 +99,44 @@ export function App() {
     void api<{ scoringConfigured: boolean }>("/api/status").then((s) => setScoringConfigured(s.scoringConfigured))
   }, [])
   useEffect(() => {
-    let current = true
-    api<Feed>("/api/feed", { method: "POST", body: { list, limit: 60, interests: local.interests, liked } }).then(
-      (next) => {
-        if (!current) return
-        setResult({ key: requestKey, feed: next })
-        setFeed(next)
+    const request = new AbortController()
+    const live = () => !request.signal.aborted
+    streamFeed(
+      { list, limit: 60, interests: local.interests, liked },
+      (event) => {
+        if (!live()) return
+        if (event.type === "feed") {
+          // Stories and every cached score, straight away.
+          setFeed({ list: event.list, profileEmpty: event.profileEmpty, stories: event.stories, errors: [] })
+          setResult({ key: requestKey, phase: event.pending ? "scoring" : "done" })
+        } else if (event.type === "score") {
+          setFeed(
+            (f) =>
+              f && {
+                ...f,
+                stories: f.stories.map((s) => (s.id === event.id ? { ...s, judgment: event.judgment } : s)),
+              },
+          )
+        } else if (event.type === "done") {
+          setFeed((f) => f && { ...f, stats: event.stats, errors: event.errors })
+          setResult({ key: requestKey, phase: "done" })
+        } else {
+          setResult({ key: requestKey, phase: "done", error: event.error })
+        }
       },
-      (e: Error) => current && setResult({ key: requestKey, error: e.message }),
-    )
-    return () => {
-      current = false
-    }
+      request.signal,
+    ).catch((e: Error) => live() && setResult({ key: requestKey, phase: "done", error: e.message }))
+    return () => request.abort()
     // requestKey already encodes list, version and the profile fields sent.
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [requestKey])
 
-  const loading = result?.key !== requestKey
-  const feedError = !loading ? (result?.error ?? "") : ""
+  /** No reply yet for the current request. */
+  const fetching = result?.key !== requestKey
+  /** Stories are on screen and the remaining scores are arriving. */
+  const scoring = !fetching && result?.phase === "scoring"
+  const loading = fetching || scoring
+  const feedError = !fetching ? (result?.error ?? "") : ""
 
   function saveInterests(next: Partial<Interest>[]) {
     setInterests(next)
@@ -146,7 +166,8 @@ export function App() {
     return feed.stories.toSorted((a, b) => relevance(b) - relevance(a) || a.rank - b.rank)
   }, [feed, mode, threshold])
 
-  const showSkeleton = loading && (!feed || feed.list !== list)
+  const showSkeleton = fetching && (!feed || feed.list !== list)
+  const stillScoring = scoring ? (feed?.stories.filter((s) => !s.judgment).length ?? 0) : 0
   // The feed's empty-state prompt and the sidebar's Ask-your-AI button never show together.
   const feedPrompt = Boolean(feed?.profileEmpty) && !showSkeleton
   const stats = feed?.stats
@@ -210,12 +231,14 @@ export function App() {
             )}
             <span className="flex-1 font-mono text-xs text-muted-foreground">
               {showSkeleton
-                ? "Fetching and scoring stories…"
-                : loading
+                ? "Fetching stories…"
+                : fetching
                   ? "Refreshing…"
-                  : stats
-                    ? `${stats.stories} stories${stats.judgedNow ? ` · ${stats.judgedNow} scored just now` : ""}`
-                    : ""}
+                  : scoring
+                    ? `Scoring ${stillScoring} ${stillScoring === 1 ? "story" : "stories"}…`
+                    : stats
+                      ? `${stats.stories} stories${stats.judgedNow ? ` · ${stats.judgedNow} scored just now` : ""}`
+                      : ""}
             </span>
             <Button variant="outline" size="sm" onClick={() => void loadFeed()} disabled={loading}>
               {loading ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}
@@ -228,10 +251,10 @@ export function App() {
               <AlertDescription>{feedError || `Scoring failed: ${feed!.errors.join(" · ")}`}</AlertDescription>
             </Alert>
           )}
-          {(feed?.stats.unscored ?? 0) > 0 && !loading && (
+          {(feed?.stats?.unscored ?? 0) > 0 && !loading && (
             <Alert className="mb-3">
               <AlertDescription>
-                Scoring is paused for a few minutes, so {feed!.stats.unscored} stories aren't scored yet. Refresh in a
+                Scoring is paused for a few minutes, so {feed!.stats!.unscored} stories aren't scored yet. Refresh in a
                 bit.
               </AlertDescription>
             </Alert>
@@ -261,9 +284,13 @@ export function App() {
                   story={likedIds.has(s.id) ? { ...s, upvoted: true } : s}
                   interests={interestMap}
                   dim={mode !== "filter" && s.judgment != null && s.judgment.relevance * 100 < threshold}
+                  pending={scoring && !s.judgment}
                 />
               ))}
             </ul>
+          ) : scoring ? (
+            // Filter view with nothing over the threshold yet: scores are still coming in.
+            <FeedSkeleton />
           ) : (
             feed && (
               <Empty>
