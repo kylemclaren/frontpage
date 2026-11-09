@@ -1,0 +1,60 @@
+{
+  "name": "frontpage",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "bun scripts/dev.ts",
+    "dev:api": "PORT=4792 bun --hot server/server.ts",
+    "dev:web": "vite",
+    "build": "tsc -b && vite build",
+    "start": "NODE_ENV=production bun server/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc -b",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "check": "oxfmt --check && oxlint && tsc -b && bun test"
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.9.0",
+    "@fontsource-variable/inter": "^5.3.0",
+    "@tailwindcss/vite": "^4",
+    "border-beam": "1.4.1",
+    "class-variance-authority": "^0.7.1",
+    "cn": "^0.5.2",
+    "loading-dev": "0.3.6",
+    "lucide-react": "^1.70.0",
+    "motion": "14.6.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "shadcn": "^4.23.0",
+    "tailwindcss": "^4",
+    "tw-animate-css": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^24",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@vitejs/plugin-react": "^6",
+    "oxfmt": "0.75.0",
+    "oxlint": "1.90.0",
+    "typescript": "~6.0.2",
+    "vite": "^8"
+  },
+  "dockerfile": {
+    "bun": true,
+    "port": 8080,
+    "envs": {
+      "build": {
+        "SITE_URL": "https://frontpage.fly.dev"
+      },
+      "deploy": {
+        "PORT": "8080"
+      }
+    }
+  }
+}

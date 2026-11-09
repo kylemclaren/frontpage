@@ -1,0 +1,27 @@
+# Fly.io config for https://frontpage.fly.dev
+# Stateless app: reader profiles live in each browser, and the shared score
+# cache lives in Fly Managed Postgres (frontpage-db, attached as DATABASE_URL).
+
+app = "frontpage"
+primary_region = "iad"
+
+[build]
+dockerfile = "Dockerfile"
+
+[http_service]
+internal_port = 8080
+force_https = true
+auto_stop_machines = "stop"
+auto_start_machines = true
+min_machines_running = 0
+
+[[http_service.checks]]
+method = "GET"
+path = "/api/status"
+interval = "30s"
+timeout = "5s"
+grace_period = "10s"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "512mb"

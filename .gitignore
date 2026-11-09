@@ -1,0 +1,24 @@
+# dependencies and build output
+node_modules
+dist
+*.tsbuildinfo
+
+# local secrets: only .env.example is committed
+.env
+.env.*
+!.env.example
+
+# local cache database (production uses Postgres)
+data/
+*.sqlite*
+
+# OS / editor / logs
+.DS_Store
+*.log
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# local-only notes and tooling
+promo/
+.claude/

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Frontpage</title>
+    <meta
+      name="description"
+      content="Hacker News, ranked for you. Tell it what you're into, or let ChatGPT or Claude tell it for you. Every story gets a score."
+    />
+    <meta name="theme-color" content="#0b0b0a" />
+
+    <!-- Social previews. %SITE_URL% is filled in at build time from SITE_URL (see vite.config.ts). -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Frontpage" />
+    <meta property="og:title" content="Frontpage: Hacker News, ranked for you" />
+    <meta
+      property="og:description"
+      content="Hacker News, ranked for you. Tell it what you're into, or let ChatGPT or Claude tell it for you. Every story gets a score."
+    />
+    <meta property="og:url" content="%SITE_URL%/" />
+    <meta property="og:image" content="%SITE_URL%/og.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="Frontpage: Hacker News stories, each with a relevance score and the interest it matches."
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Frontpage: Hacker News, ranked for you" />
+    <meta
+      name="twitter:description"
+      content="Hacker News, ranked for you. Tell it what you're into, or let ChatGPT or Claude tell it for you. Every story gets a score."
+    />
+    <meta name="twitter:image" content="%SITE_URL%/og.jpg" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
