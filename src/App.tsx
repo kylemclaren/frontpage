@@ -30,10 +30,47 @@ const relevance = (s: Story) => s.judgment?.relevance ?? -1
 
 function Brand() {
   return (
-    <div className="flex items-center gap-2 font-mono text-[17px] font-bold tracking-tight">
+    <div className="flex shrink-0 items-center gap-2 font-mono text-[17px] font-bold tracking-tight">
       <Logo className="size-7" />
-      Frontpage
+      {/* Phones show the logo alone so the list tabs fit on the same row. */}
+      <span className="max-sm:sr-only">Frontpage</span>
     </div>
+  )
+}
+
+const MODES: { value: Mode; label: string; title: string }[] = [
+  { value: "bubble", label: "Bubble up", title: "Most relevant first" },
+  { value: "filter", label: "Filter", title: "Hide stories below the threshold" },
+  { value: "hn", label: "HN order", title: "HN's own order, relevance shown" },
+]
+
+function ModeToggle({
+  mode,
+  onChange,
+  size = "sm",
+  className,
+}: {
+  mode: Mode
+  onChange: (m: Mode) => void
+  size?: "sm" | "default"
+  className?: string
+}) {
+  return (
+    <ToggleGroup
+      variant="outline"
+      size={size}
+      spacing={0}
+      value={[mode]}
+      onValueChange={(v) => v[0] && onChange(v[0] as Mode)}
+      aria-label="How to order stories"
+      className={className}
+    >
+      {MODES.map((m) => (
+        <ToggleGroupItem key={m.value} value={m.value} title={m.title}>
+          {m.label}
+        </ToggleGroupItem>
+      ))}
+    </ToggleGroup>
   )
 }
 
@@ -175,10 +212,11 @@ export function App() {
   return (
     <div className="min-h-svh">
       <header className="sticky top-0 z-20 border-b bg-background/85 backdrop-blur-md">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-5 gap-y-2 px-4 py-2.5 sm:px-6">
+        {/* One row at every width: on phones the tabs stretch to fill it and the mode toggle moves to the feed toolbar. */}
+        <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2 sm:gap-5 sm:px-6 sm:py-2.5">
           <Brand />
-          <Tabs value={list} onValueChange={(v) => setList(v as List)}>
-            <TabsList>
+          <Tabs value={list} onValueChange={(v) => setList(v as List)} className="min-w-0 flex-1 sm:flex-none">
+            <TabsList className="w-full sm:w-fit">
               {LISTS.map((l) => (
                 <TabsTrigger key={l.value} value={l.value}>
                   {l.label}
@@ -186,38 +224,34 @@ export function App() {
               ))}
             </TabsList>
           </Tabs>
-          <div className="ml-auto flex items-center gap-1.5">
-            <ToggleGroup
-              variant="outline"
-              size="sm"
-              spacing={0}
-              value={[mode]}
-              onValueChange={(v) => v[0] && setMode(v[0] as Mode)}
-              aria-label="How to order stories"
-            >
-              <ToggleGroupItem value="bubble" title="Most relevant first">
-                Bubble up
-              </ToggleGroupItem>
-              <ToggleGroupItem value="filter" title="Hide stories below the threshold">
-                Filter
-              </ToggleGroupItem>
-              <ToggleGroupItem value="hn" title="HN's own order, relevance shown">
-                HN order
-              </ToggleGroupItem>
-            </ToggleGroup>
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            <ModeToggle mode={mode} onChange={setMode} className="max-md:hidden" />
             <ThemeToggle />
           </div>
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-6xl gap-7 px-4 pt-5 pb-16 sm:px-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+      <main className="mx-auto grid max-w-6xl gap-4 px-4 pt-4 pb-16 sm:px-6 md:pt-5 lg:grid-cols-[minmax(0,1fr)_20rem] lg:gap-7">
         <section className="min-w-0">
-          <div className="mb-2 flex min-h-8 flex-wrap items-center gap-4">
+          {/* Phones: the mode toggle, full width, with an icon-only Refresh beside it. */}
+          <div className="mb-3 flex items-center gap-2 md:hidden">
+            <ModeToggle mode={mode} onChange={setMode} size="default" className="w-full min-w-0 flex-1 *:flex-1" />
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label="Refresh"
+              onClick={() => void loadFeed()}
+              disabled={loading}
+            >
+              {loading ? <Spinner /> : <RefreshCwIcon />}
+            </Button>
+          </div>
+          <div className="mb-2 flex min-h-8 flex-wrap items-center gap-x-4 gap-y-2">
             {mode === "filter" && (
-              <div className="flex shrink-0 items-center gap-3 text-sm text-muted-foreground">
+              <div className="flex items-center gap-3 text-sm text-muted-foreground max-md:w-full md:shrink-0">
                 <span>Threshold</span>
-                {/* Fixed-size box: the slider alone reports too small a width to flex layout and overlaps its neighbours. */}
-                <div className="w-32 shrink-0">
+                {/* Sized box: the slider alone reports too small a width to flex layout and overlaps its neighbours. */}
+                <div className="min-w-0 flex-1 md:w-32 md:flex-none">
                   <Slider
                     min={0}
                     max={100}
@@ -240,7 +274,13 @@ export function App() {
                       ? `${stats.stories} stories${stats.judgedNow ? ` · ${stats.judgedNow} scored just now` : ""}`
                       : ""}
             </span>
-            <Button variant="outline" size="sm" onClick={() => void loadFeed()} disabled={loading}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="max-md:hidden"
+              onClick={() => void loadFeed()}
+              disabled={loading}
+            >
               {loading ? <Spinner /> : <RefreshCwIcon data-icon="inline-start" />}
               Refresh
             </Button>

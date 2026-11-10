@@ -1,5 +1,5 @@
 import { BorderBeam } from "border-beam"
-import { ArrowRightIcon, PlusIcon, XIcon } from "lucide-react"
+import { ArrowRightIcon, ChevronDownIcon, PlusIcon, XIcon } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
 import { AnimatedItem } from "@/components/animated-item"
@@ -29,7 +29,8 @@ function InterestItem({ interest, onRemove }: { interest: Interest; onRemove: ()
         variant="ghost"
         size="icon-xs"
         aria-label={`Remove ${interest.label}`}
-        className="text-muted-foreground opacity-60 group-hover:opacity-100 hover:text-destructive"
+        // Touch screens have no hover: show it in full, with a finger-sized target.
+        className="text-muted-foreground opacity-60 group-hover:opacity-100 hover:text-destructive pointer-coarse:-my-1.5 pointer-coarse:size-8 pointer-coarse:opacity-100"
         onClick={onRemove}
       >
         <XIcon />
@@ -93,6 +94,8 @@ export function InterestsCard({
   className?: string
 }) {
   const { interests } = profile
+  // Below the lg breakpoint the card sits above the feed, so it starts folded to one line.
+  const [expanded, setExpanded] = useState(false)
   const [adding, setAdding] = useState(false)
   const focusRef = useRef<HTMLInputElement>(null)
   // Move focus into the form when it is opened by a click.
@@ -125,16 +128,41 @@ export function InterestsCard({
 
   return (
     // On wide screens the card stays pinned under the header; the list takes whatever height is left.
-    <Card className={cn("lg:sticky lg:top-[4.5rem] lg:max-h-[calc(100svh-5.5rem)]", className)}>
-      <CardHeader>
-        <CardTitle className="text-xs font-medium tracking-wider text-muted-foreground uppercase">Interests</CardTitle>
+    <Card className={cn("max-lg:pt-0 lg:sticky lg:top-[4.5rem] lg:max-h-[calc(100svh-5.5rem)]", className)}>
+      <CardHeader className={cn("grid-cols-[minmax(0,1fr)]", expanded && "max-lg:-mb-2")}>
+        <CardTitle className="text-xs font-medium tracking-wider text-muted-foreground uppercase max-lg:hidden">
+          Interests
+        </CardTitle>
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-controls="interests-body"
+          onClick={() => setExpanded((e) => !e)}
+          className="-mx-(--card-spacing) flex min-w-0 items-center gap-3 px-(--card-spacing) py-3 text-left lg:hidden"
+        >
+          <span className="text-xs font-medium tracking-wider text-muted-foreground uppercase">Interests</span>
+          <span className="min-w-0 flex-1 truncate text-sm">
+            {wants.length ? (
+              wants.map((i) => i.label).join(", ")
+            ) : (
+              <span className="text-muted-foreground">None yet</span>
+            )}
+            {skips.length > 0 && <span className="text-muted-foreground"> · {skips.length} skipped</span>}
+          </span>
+          <ChevronDownIcon
+            className={cn("size-4 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-180")}
+          />
+        </button>
       </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
+      <CardContent
+        id="interests-body"
+        className={cn("flex min-h-0 flex-1 flex-col gap-3", !expanded && "max-lg:hidden")}
+      >
         {!hideAskAi && <AskAiButton onClick={onAskAi} compact={interests.length > 0} className="shrink-0" />}
 
         {interests.length ? (
           // The list scrolls inside the card; its top/bottom edges fade where there is more to see.
-          <FadeScrollArea className="-mx-2 max-h-[22rem] lg:max-h-none lg:flex-1" viewportClassName="px-2 py-1">
+          <FadeScrollArea className="-mx-2 lg:flex-1" viewportClassName="px-2 py-1">
             <ul className="grid gap-3">
               {wants.map((i) => (
                 <InterestItem key={i.id} interest={i} onRemove={() => remove(i.id)} />
@@ -192,7 +220,7 @@ export function InterestsCard({
           )}
         </div>
       </CardContent>
-      <CardFooter className="shrink-0 py-2.5">
+      <CardFooter className={cn("shrink-0 py-2.5", !expanded && "max-lg:hidden")}>
         <HnSource profile={profile} onImport={onImportHn} onForget={onForgetHn} />
       </CardFooter>
     </Card>

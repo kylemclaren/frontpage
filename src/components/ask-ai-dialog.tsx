@@ -134,8 +134,9 @@ export function AskAiDialog({
           <pre className="max-h-36 overflow-auto rounded-lg border bg-muted/50 p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-muted-foreground select-all">
             {ASK_AI_PROMPT}
           </pre>
-          <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={copy}>
+          {/* Phones: Copy prompt across the top, the two assistants side by side under it. */}
+          <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
+            <Button size="sm" className="col-span-2 max-sm:h-9" onClick={copy}>
               {copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}
               {copied ? "Copied" : "Copy prompt"}
             </Button>
@@ -143,7 +144,7 @@ export function AskAiDialog({
               href={chatgptUrl()}
               target="_blank"
               rel="noopener"
-              className={buttonVariants({ variant: "outline", size: "sm" })}
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "max-sm:h-9")}
             >
               Open in ChatGPT
               <ExternalLinkIcon data-icon="inline-end" />
@@ -152,7 +153,7 @@ export function AskAiDialog({
               href={claudeUrl()}
               target="_blank"
               rel="noopener"
-              className={buttonVariants({ variant: "outline", size: "sm" })}
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "max-sm:h-9")}
             >
               Open in Claude
               <ExternalLinkIcon data-icon="inline-end" />
@@ -201,7 +202,7 @@ export function AskAiDialog({
           <span className="text-xs text-muted-foreground">
             Only the topics you keep are saved, and only on this machine.
           </span>
-          <Button onClick={save} disabled={kept.length === 0 || saving}>
+          <Button onClick={save} disabled={kept.length === 0 || saving} className="max-sm:h-10 max-sm:w-full">
             {kept.length ? `Add ${kept.length} to my feed` : "Add to my feed"}
           </Button>
         </DialogFooter>
