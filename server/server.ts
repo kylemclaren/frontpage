@@ -6,10 +6,10 @@
  * an interest share the work.
  */
 import { join, normalize } from "node:path"
-import { isEmpty, judge, type Profile } from "./classify"
+import { isEmpty, judge, profileQuestions, type Profile } from "./classify"
 import { fetchFavorites, fetchSubmissions, LISTS, siteOf, stories, type ListName, type SavedStory } from "./hn"
 import { hasApiKey, PRICE_PER_INPUT_TOKEN } from "./jev"
-import { clientKey, globalScoring, perVisitorImports, perVisitorScoring } from "./limits"
+import { clientKey, perVisitorImports, reserveScoring } from "./limits"
 import type { Interest } from "./topics"
 
 /** Caps on what a browser may send, so one request can't ask for unbounded scoring. */
@@ -131,7 +131,12 @@ const server = Bun.serve({
 
           const items = await stories(list, limit)
           const visitor = clientKey(req, server.requestIP(req)?.address)
-          const maxQuestions = Math.min(perVisitorScoring.remaining(visitor), globalScoring.remaining("all"))
+          // Reserve the most this request could ask before scoring starts, so overlapping
+          // requests can't all be admitted against the same budget. Unused questions
+          // (cached answers, mostly) are refunded when scoring finishes.
+          const questionsPerStory = new Set(profileQuestions(profile).map((q) => q.key)).size
+          const reservation = reserveScoring(visitor, questionsPerStory * items.length)
+          const maxQuestions = reservation.granted
           const started = performance.now()
 
           // The reply is a stream of JSON lines: the stories with every score already
@@ -148,6 +153,7 @@ const server = Bun.serve({
                   open = false // the reader went away; scoring still finishes and is cached
                 }
               }
+              let asked = 0
               try {
                 const result = await judge(items, profile, {
                   maxQuestions,
@@ -172,8 +178,7 @@ const server = Bun.serve({
                     }),
                   onScored: (id, judgment) => send({ type: "score", id, judgment }),
                 })
-                perVisitorScoring.spend(visitor, result.asked)
-                globalScoring.spend("all", result.asked)
+                asked = result.asked
                 send({
                   type: "done",
                   stats: {
@@ -189,6 +194,8 @@ const server = Bun.serve({
                 })
               } catch (err) {
                 send({ type: "error", error: err instanceof Error ? err.message : String(err) })
+              } finally {
+                reservation.settle(asked)
               }
               if (open) controller.close()
             },
